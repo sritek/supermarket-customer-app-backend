@@ -8,61 +8,65 @@ import { AuthRequest } from "../middlewares/auth";
 // So we manually fetch products from admin DB and attach them to cart items
 const populateCartProducts = async (cart: any) => {
   if (!cart || !cart.items || cart.items.length === 0) {
-    return cart;
+    // Convert to plain object if it's a mongoose document
+    return cart.toObject ? cart.toObject() : cart;
   }
 
+  // Convert cart to plain object first to avoid mongoose document issues
+  const cartObj = cart.toObject ? cart.toObject() : { ...cart };
+
   // Get all product IDs from cart items
-  const productIds = cart.items.map((item: any) => item.product);
+  const productIds = cartObj.items.map((item: any) => item.product);
 
   // Fetch products from admin DB
   // Note: Admin DB products use 'sku' not 'slug', but we'll generate slug for compatibility
   const products = await Product.find({
     _id: { $in: productIds },
     status: "ACTIVE",
-  }).select("name price images stock sku unit brand");
+  }).select("_id name price images stock sku unit brand");
 
   // Create a map of productId -> product for quick lookup
   const productMap = new Map();
   products.forEach((product: any) => {
-    productMap.set(product._id.toString(), product.toObject());
+    const productObj = product.toObject ? product.toObject() : product;
+    productMap.set(productObj._id.toString(), productObj);
   });
 
   // Attach products to cart items
-  cart.items = cart.items
+  cartObj.items = cartObj.items
     .map((item: any) => {
       const productId = item.product.toString();
       const product = productMap.get(productId);
 
       if (product) {
-        const productObj = product.toObject ? product.toObject() : product;
         // Add stockQuantity virtual for compatibility
-        productObj.stockQuantity = productObj.stock || 0;
+        product.stockQuantity = product.stock || 0;
         // Generate slug from name if not present (admin DB uses sku, not slug)
-        if (!productObj.slug && productObj.name) {
-          productObj.slug = productObj.name
+        if (!product.slug && product.name) {
+          product.slug = product.name
             .toLowerCase()
             .replace(/\s+/g, "-")
             .replace(/[^a-z0-9-]/g, "");
         }
         // If still no slug, use sku or _id as fallback
-        if (!productObj.slug) {
-          productObj.slug = productObj.sku || productObj._id.toString();
+        if (!product.slug) {
+          product.slug = product.sku || product._id.toString();
         }
         return {
-          ...(item.toObject ? item.toObject() : item),
-          product: productObj,
+          ...item,
+          product: product,
         };
       }
 
       // If product not found, return item with null product (will be filtered out)
       return {
-        ...(item.toObject ? item.toObject() : item),
+        ...item,
         product: null,
       };
     })
     .filter((item: any) => item.product !== null); // Remove items with missing products
 
-  return cart;
+  return cartObj;
 };
 
 export const getCart = async (
