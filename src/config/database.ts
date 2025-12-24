@@ -2,8 +2,8 @@ import mongoose, { Connection } from "mongoose";
 import { ServerApiVersion } from "mongodb";
 
 // CUSTOMER DATABASE OWNERSHIP
-// This database owns only customer-specific data: users, addresses, carts
-// Must NOT contain: products, categories, orders, inventory
+// This database owns customer-specific data: users, addresses, carts, orders
+// Must NOT contain: products, categories, inventory
 // Customer app must read products/categories from admin DB via API or direct connection
 
 const clientOptions = {
@@ -96,9 +96,9 @@ const connectDB = async (): Promise<void> => {
     console.log(`   Host: ${conn.connection.host}`);
     console.log(`   Database: ${conn.connection.name}`);
     console.log(
-      `   Note: This DB contains only customer data (users, addresses, carts)`
+      `   Note: This DB contains customer data (users, addresses, carts, orders)`
     );
-    console.log(`   Products/Categories/Orders are stored in admin DB`);
+    console.log(`   Products/Categories are stored in admin DB`);
   } catch (error) {
     console.error("❌ Customer MongoDB connection error:", error);
     console.error(

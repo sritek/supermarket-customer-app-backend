@@ -41,10 +41,8 @@ export const createOrder = async (
       return;
     }
 
-    // Get cart
-    const cart = await Cart.findOne({ user: req.user?._id }).populate(
-      "items.product"
-    );
+    // Get cart (without populate - products are in different DB)
+    const cart = await Cart.findOne({ user: req.user?._id });
 
     if (!cart || cart.items.length === 0) {
       res.status(400).json({ success: false, error: "Cart is empty" });
@@ -62,12 +60,38 @@ export const createOrder = async (
       return;
     }
 
+    // Manually populate products from admin DB (populate doesn't work across DBs)
+    const cartObj = cart.toObject ? cart.toObject() : { ...cart };
+    const productIds = cartObj.items.map((item: any) => item.product);
+
+    // Fetch products from admin DB
+    const products = await Product.find({
+      _id: { $in: productIds },
+      status: "ACTIVE",
+    }).select("_id name price images stock sku unit brand");
+
+    // Create a map of productId -> product for quick lookup
+    const productMap = new Map();
+    products.forEach((product: any) => {
+      const productObj = product.toObject ? product.toObject() : product;
+      productMap.set(productObj._id.toString(), productObj);
+    });
+
     // Calculate totals
     let subtotal = 0;
     const orderItems = [];
 
-    for (const item of cart.items) {
-      const product = item.product as any;
+    for (const item of cartObj.items) {
+      const productId = item.product.toString();
+      const product = productMap.get(productId);
+
+      if (!product) {
+        res.status(400).json({
+          success: false,
+          error: `Product not found for item in cart`,
+        });
+        return;
+      }
 
       // Admin DB uses 'stock' field, but virtual provides 'stockQuantity' for compatibility
       const availableStock = product.stock || product.stockQuantity || 0;
@@ -100,16 +124,15 @@ export const createOrder = async (
     const deliveryFee = subtotal >= 500 ? 0 : DELIVERY_FEE; // Free delivery above ₹500
     const total = subtotal + tax + deliveryFee;
 
-    // Create order in admin DB
-    // Note: Orders are stored in admin DB, referencing customer via customerId
+    // Create order in customer DB
     const order = await Order.create({
-      customerId: req.user!._id, // Reference to User._id from customer DB
+      customerId: req.user!._id,
       items: orderItems,
       subtotal,
       tax,
       deliveryFee,
       total,
-      address: addressId, // Reference to Address._id from customer DB
+      address: addressId,
       paymentMethod,
       paymentStatus: paymentMethod === "cod" ? "pending" : "paid", // Razorpay orders are paid
       orderStatus: "placed",
@@ -121,9 +144,8 @@ export const createOrder = async (
     cart.items = [];
     await cart.save();
 
-    // Note: Cannot populate address/product as they're in different databases
-    // Frontend should fetch address/product details separately if needed
-    // Order items already contain name, price, quantity, image
+    // Populate address before returning
+    await order.populate('address');
 
     res.status(201).json({ success: true, order });
   } catch (error: any) {
@@ -136,11 +158,10 @@ export const getOrders = async (
   res: Response
 ): Promise<void> => {
   try {
-    // Customer can only read their own orders from admin DB
-    // Orders are filtered by customerId (User._id from customer DB)
+    // Customer can only read their own orders
+    // Populate address since it's in the same database (customer DB)
     const orders = await Order.find({ customerId: req.user?._id })
-      // Note: Cannot populate address/product as they're in different databases
-      // Order items already contain name, price, quantity, image
+      .populate('address')
       .sort({ createdAt: -1 });
 
     res.json({ success: true, orders });
@@ -157,12 +178,11 @@ export const getOrder = async (
     const { orderId } = req.params;
 
     // Customer can only read their own orders
+    // Populate address since it's in the same database (customer DB)
     const order = await Order.findOne({
       _id: orderId,
       customerId: req.user?._id, // Ensure customer can only access their own orders
-    });
-    // Note: Cannot populate address/product as they're in different databases
-    // Order items already contain name, price, quantity, image
+    }).populate('address');
 
     if (!order) {
       res.status(404).json({ success: false, error: "Order not found" });

@@ -1,11 +1,9 @@
 import mongoose, { Document, Schema } from 'mongoose';
-import { adminDbConnection } from '../config/database';
 
-// SOURCE OF TRUTH: Admin DB
-// Orders are created ONLY in supermarket_admin database
-// References customer via customerId (ObjectId from customer DB - User._id)
-// Customer APIs can read only their own orders, cannot update order status
-// This model uses admin DB connection
+// Orders are stored in the CUSTOMER database (supermarket_customer)
+// This allows the customer app to create orders after payment
+// Admin panel can access orders via API if needed
+// References products via product ObjectId (from admin DB - stored as reference)
 
 export interface IOrderItem {
   product: mongoose.Types.ObjectId; // References product ID from admin DB
@@ -36,7 +34,8 @@ export interface IOrder extends Document {
 const OrderItemSchema = new Schema<IOrderItem>({
   product: {
     type: Schema.Types.ObjectId,
-    ref: 'Product',
+    // Note: No ref - Product is in admin DB, order is in customer DB (cross-DB reference)
+    // Product data is stored directly in order items (name, price, image)
     required: true
   },
   name: {
@@ -61,9 +60,8 @@ const OrderSchema = new Schema<IOrder>(
   {
     customerId: {
       type: Schema.Types.ObjectId,
+      ref: 'User',
       required: true,
-      // Note: References User._id from customer DB (cross-DB reference)
-      // Cannot use ref: 'User' as User is in different database
     },
     items: [OrderItemSchema],
     subtotal: {
@@ -90,9 +88,8 @@ const OrderSchema = new Schema<IOrder>(
     },
     address: {
       type: Schema.Types.ObjectId,
+      ref: 'Address',
       required: true,
-      // Note: References Address._id from customer DB (cross-DB reference)
-      // Cannot use ref: 'Address' as Address is in different database
     },
     paymentMethod: {
       type: String,
@@ -130,43 +127,7 @@ OrderSchema.index({ customerId: 1, createdAt: -1 });
 OrderSchema.index({ orderStatus: 1 });
 OrderSchema.index({ paymentStatus: 1 });
 
-// Use admin DB connection for orders
-// Model is created lazily when first accessed (after admin connection is established)
-
-let OrderModel: mongoose.Model<IOrder> | null = null;
-
-const getOrderModel = (): mongoose.Model<IOrder> => {
-  // If model already created, return it
-  if (OrderModel) {
-    return OrderModel;
-  }
-  
-  // Check if admin connection is ready
-  if (adminDbConnection && adminDbConnection.readyState === 1) {
-    // Check if model already exists on this connection
-    if (adminDbConnection.models.Order) {
-      OrderModel = adminDbConnection.models.Order as mongoose.Model<IOrder>;
-    } else {
-      OrderModel = adminDbConnection.model<IOrder>('Order', OrderSchema);
-    }
-    return OrderModel;
-  }
-  
-  // Admin connection not ready yet - this should not happen in normal flow
-  // but we'll throw an error to make it clear
-  throw new Error('Order model: Admin database connection not established. Ensure connectAdminDB() is called in server.ts before using Order model.');
-};
-
-// Export a proxy that lazily initializes the model on first access
-export default new Proxy({} as mongoose.Model<IOrder>, {
-  get(target, prop) {
-    const model = getOrderModel();
-    const value = (model as any)[prop];
-    // If it's a function, bind it to the model
-    if (typeof value === 'function') {
-      return value.bind(model);
-    }
-    return value;
-  }
-}) as mongoose.Model<IOrder>;
+// Use default mongoose connection (customer DB) for orders
+// This allows the customer app to create orders after payment
+export default mongoose.model<IOrder>('Order', OrderSchema);
 
