@@ -1,22 +1,35 @@
-services:
-  - type: web
-    name: supermarket-backend
-    env: node
-    buildCommand: npm install && npm run build
-    startCommand: npm start
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: MONGODB_URI
-        sync: false
-      - key: JWT_SECRET
-        sync: false
-      - key: JWT_EXPIRE
-        value: 7d
-      - key: RAZORPAY_KEY_ID
+# Exported from Render on 2025-12-25T09:05:14Z
+version: "1"
+projects:
+- name: supermarket-backend
+  environments:
+  - name: Production
+    services:
+    - type: web
+      name: supermarket-customer-app-backend
+      runtime: node
+      repo: https://github.com/sritek/supermarket-customer-app-backend
+      plan: free
+      envVars:
+      - key: FRONTEND_URL
         sync: false
       - key: RAZORPAY_KEY_SECRET
         sync: false
-      - key: FRONTEND_URL
+      - key: RAZORPAY_KEY_ID
         sync: false
-
+      - key: JWT_EXPIRE
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: MONGO_CUSTOMER_URI
+        sync: false
+      - key: MONGO_ADMIN_URI
+        sync: false
+      - key: PORT
+        sync: false
+      - key: NODE_ENV
+        sync: false
+      region: oregon
+      buildCommand: npm ci && npm run build
+      startCommand: npm start
+      autoDeployTrigger: "off"
