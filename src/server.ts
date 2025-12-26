@@ -27,13 +27,13 @@ const startServer = async () => {
     // Admin DB: for reading products, categories (read-only)
     await connectDB(); // Customer DB
     await connectAdminDB(); // Admin DB (for products/categories)
-    
+
     // Now start the server
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
   } catch (error) {
-    console.error('Failed to establish database connections:', error);
+    console.error("Failed to establish database connections:", error);
     process.exit(1);
   }
 };
