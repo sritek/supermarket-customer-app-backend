@@ -1,5 +1,5 @@
 import { Response } from "express";
-import Order, { IOrderItem } from "../models/Order";
+import Order, { IAdminOrderItem } from "../models/AdminOrder";
 import Cart from "../models/Cart";
 import Product from "../models/Product";
 import Address, { IAddress } from "../models/Address";
@@ -79,7 +79,7 @@ export const createOrder = async (
 
     // Calculate totals
     let subtotal = 0;
-    const orderItems: IOrderItem[] = [];
+    const orderItems: IAdminOrderItem[] = [];
 
     for (const item of cartObj.items) {
       const productId = item.product.toString();
@@ -111,7 +111,7 @@ export const createOrder = async (
         name: product.name,
         price: product.price,
         quantity: item.quantity,
-        image: product.images?.[0],
+        subtotal: itemTotal,
       });
 
       // NOTE: Customer app should NOT update stock directly (read-only access)
