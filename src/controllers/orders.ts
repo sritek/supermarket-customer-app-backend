@@ -1,11 +1,12 @@
 import { Response } from "express";
-import Order, { IAdminOrderItem } from "../models/AdminOrder";
+import AdminOrder, { IAdminOrderItem } from "../models/AdminOrder";
 import Cart from "../models/Cart";
 import Product from "../models/Product";
 import Address, { IAddress } from "../models/Address";
 import Razorpay from "razorpay";
 import { AuthRequest } from "../middlewares/auth";
 import { getRazorpay } from "../utils/razorpay";
+import { adminDbConnection } from "../config/database";
 
 // const razorpay = new Razorpay({
 //   key_id: process.env.RAZORPAY_KEY_ID || "",
@@ -124,32 +125,111 @@ export const createOrder = async (
     const deliveryFee = subtotal >= 500 ? 0 : DELIVERY_FEE; // Free delivery above ₹500
     const total = subtotal + tax + deliveryFee;
 
-    // Create order in customer DB
-    const order = await Order.create({
-      customerId: req.user!._id,
-      items: orderItems,
-      subtotal,
-      tax,
-      deliveryFee,
-      total,
-      address: addressId,
-      paymentMethod,
-      paymentStatus: paymentMethod === "cod" ? "pending" : "paid", // Razorpay orders are paid
-      orderStatus: "placed",
-      razorpayOrderId: razorpayOrderId || undefined,
-      razorpayPaymentId: razorpayPaymentId || undefined,
-    });
+    // Verify admin DB connection is ready
+    if (!adminDbConnection || adminDbConnection.readyState !== 1) {
+      console.error("Admin DB connection not established when trying to create order.");
+      res.status(503).json({ 
+        success: false, 
+        error: "Admin services unavailable. Please try again later." 
+      });
+      return;
+    }
 
-    // Clear cart
-    cart.items = [];
-    await cart.save();
+    // Generate order number before creating the order
+    const count = await AdminOrder.countDocuments();
+    const orderNumber = `ORD-${Date.now()}-${String(count + 1).padStart(4, "0")}`;
 
-    // Populate address before returning
-    await order.populate<{ address: IAddress }>('address');
+    // Map payment method to AdminOrder enum format
+    const paymentMethodMap: Record<string, 'CASH' | 'CARD' | 'ONLINE' | 'OTHER'> = {
+      'cod': 'CASH',
+      'razorpay': 'ONLINE',
+      'card': 'CARD',
+    };
 
-    res.status(201).json({ success: true, order });
+    // Get address details for shipping address
+    const addressObj = address.toObject ? address.toObject() : address;
+    const fullAddress = addressObj.addressLine2 
+      ? `${addressObj.addressLine1}, ${addressObj.addressLine2}`
+      : addressObj.addressLine1;
+
+    // Create order directly in admin DB (single source of truth)
+    try {
+      const order = await AdminOrder.create({
+        orderNumber, // Required field
+        customer: req.user!._id, // Note: customer field, not customerId
+        items: orderItems,
+        subtotal,
+        tax,
+        shipping: deliveryFee, // Note: shipping field, not deliveryFee
+        total,
+        status: 'PLACED', // Note: status field (uppercase enum), not orderStatus
+        paymentMethod: paymentMethodMap[paymentMethod] || 'OTHER',
+        paymentStatus: paymentMethod === "cod" ? "PENDING" : "PAID", // Note: uppercase enum
+        shippingAddress: {
+          street: fullAddress || addressObj.addressLine1 || '',
+          city: addressObj.city || '',
+          state: addressObj.state || '',
+          zipCode: addressObj.pincode || '',
+          country: 'India', // Default to India
+        },
+      });
+
+      // Clear cart
+      cart.items = [];
+      await cart.save();
+
+      // Transform order to match customer app format for response
+      const orderResponse = {
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        customerId: order.customer,
+        items: order.items.map((item: any) => {
+          const product = productMap.get(item.product.toString());
+          return {
+            product: item.product,
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            image: product?.images?.[0] || null,
+          };
+        }),
+        subtotal: order.subtotal,
+        tax: order.tax,
+        deliveryFee: order.shipping,
+        total: order.total,
+        address: addressObj,
+        paymentMethod: paymentMethod,
+        paymentStatus: order.paymentStatus.toLowerCase(),
+        orderStatus: order.status.toLowerCase(),
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+      };
+
+      res.status(201).json({ success: true, order: orderResponse });
+    } catch (orderCreationError: any) {
+      console.error("Error creating order in admin DB:", orderCreationError);
+      console.error("Order creation error details:", {
+        message: orderCreationError.message,
+        name: orderCreationError.name,
+        stack: orderCreationError.stack,
+      });
+      res.status(500).json({ 
+        success: false, 
+        error: orderCreationError.message || "Failed to create order." 
+      });
+      return;
+    }
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error("Error in createOrder controller:", error);
+    console.error("Error details:", {
+      message: error.message,
+      name: error.name,
+      stack: error.stack,
+    });
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || "An unexpected error occurred" 
+    });
   }
 };
 
@@ -158,14 +238,50 @@ export const getOrders = async (
   res: Response
 ): Promise<void> => {
   try {
-    // Customer can only read their own orders
-    // Populate address since it's in the same database (customer DB)
-    const orders = await Order.find({ customerId: req.user?._id })
-      .populate<{ address: IAddress }>('address')
+    // Verify admin DB connection is ready
+    if (!adminDbConnection || adminDbConnection.readyState !== 1) {
+      res.status(503).json({ 
+        success: false, 
+        error: "Admin services unavailable. Please try again later." 
+      });
+      return;
+    }
+
+    // Fetch orders from admin DB
+    const orders = await AdminOrder.find({ customer: req.user?._id })
+      .populate('items.product', 'name sku images')
       .sort({ createdAt: -1 });
 
-    res.json({ success: true, orders });
+    // Transform orders to match customer app format
+    const transformedOrders = orders.map((order: any) => {
+      const orderObj = order.toObject ? order.toObject() : order;
+      return {
+        _id: orderObj._id,
+        orderNumber: orderObj.orderNumber,
+        customerId: orderObj.customer,
+        items: orderObj.items.map((item: any) => ({
+          product: item.product,
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity,
+          image: item.product?.images?.[0] || null,
+        })),
+        subtotal: orderObj.subtotal,
+        tax: orderObj.tax,
+        deliveryFee: orderObj.shipping,
+        total: orderObj.total,
+        address: orderObj.shippingAddress,
+        paymentMethod: orderObj.paymentMethod.toLowerCase(),
+        paymentStatus: orderObj.paymentStatus.toLowerCase(),
+        orderStatus: orderObj.status.toLowerCase(),
+        createdAt: orderObj.createdAt,
+        updatedAt: orderObj.updatedAt,
+      };
+    });
+
+    res.json({ success: true, orders: transformedOrders });
   } catch (error: any) {
+    console.error("Error fetching orders:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -177,20 +293,54 @@ export const getOrder = async (
   try {
     const { orderId } = req.params;
 
-    // Customer can only read their own orders
-    // Populate address since it's in the same database (customer DB)
-    const order = await Order.findOne({
+    // Verify admin DB connection is ready
+    if (!adminDbConnection || adminDbConnection.readyState !== 1) {
+      res.status(503).json({ 
+        success: false, 
+        error: "Admin services unavailable. Please try again later." 
+      });
+      return;
+    }
+
+    // Fetch order from admin DB
+    const order = await AdminOrder.findOne({
       _id: orderId,
-      customerId: req.user?._id, // Ensure customer can only access their own orders
-    }).populate<{ address: IAddress }>('address');
+      customer: req.user?._id, // Ensure customer can only access their own orders
+    }).populate('items.product', 'name sku images');
 
     if (!order) {
       res.status(404).json({ success: false, error: "Order not found" });
       return;
     }
 
-    res.json({ success: true, order });
+    // Transform order to match customer app format
+    const orderObj = order.toObject ? order.toObject() : order;
+    const transformedOrder = {
+      _id: orderObj._id,
+      orderNumber: orderObj.orderNumber,
+      customerId: orderObj.customer,
+      items: orderObj.items.map((item: any) => ({
+        product: item.product,
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
+        image: item.product?.images?.[0] || null,
+      })),
+      subtotal: orderObj.subtotal,
+      tax: orderObj.tax,
+      deliveryFee: orderObj.shipping,
+      total: orderObj.total,
+      address: orderObj.shippingAddress,
+      paymentMethod: orderObj.paymentMethod.toLowerCase(),
+      paymentStatus: orderObj.paymentStatus.toLowerCase(),
+      orderStatus: orderObj.status.toLowerCase(),
+      createdAt: orderObj.createdAt,
+      updatedAt: orderObj.updatedAt,
+    };
+
+    res.json({ success: true, order: transformedOrder });
   } catch (error: any) {
+    console.error("Error fetching order:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
