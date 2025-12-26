@@ -21,8 +21,8 @@ export const getProducts = async (
     const limitNum = parseInt(limit as string);
     const skip = (pageNum - 1) * limitNum;
 
-    // Build query - Admin DB uses "ACTIVE" (uppercase)
-    const query: any = { status: "ACTIVE" };
+    // Build query - Include ACTIVE and UNAVAILABLE products (UNAVAILABLE shows as out of stock)
+    const query: any = { status: { $in: ["ACTIVE", "UNAVAILABLE"] } };
 
     console.log("🔍 Products query:", JSON.stringify(query, null, 2));
 
@@ -143,7 +143,7 @@ export const getProduct = async (
       // Try by _id first if it's a valid ObjectId
       product = await Product.findOne({
         _id: slug,
-        status: "ACTIVE",
+        status: { $in: ["ACTIVE", "UNAVAILABLE"] },
       }).populate("category", "name slug");
     }
 
@@ -151,7 +151,7 @@ export const getProduct = async (
     if (!product) {
       product = await Product.findOne({
         slug: slug,
-        status: "ACTIVE",
+        status: { $in: ["ACTIVE", "UNAVAILABLE"] },
       }).populate("category", "name slug");
     }
 
@@ -165,7 +165,7 @@ export const getProduct = async (
 
       product = await Product.findOne({
         name: { $regex: new RegExp(`^${normalizedPattern}$`, "i") },
-        status: "ACTIVE",
+        status: { $in: ["ACTIVE", "UNAVAILABLE"] },
       }).populate("category", "name slug");
     }
 
@@ -173,7 +173,7 @@ export const getProduct = async (
     if (!product) {
       product = await Product.findOne({
         sku: { $regex: new RegExp(`^${slug}$`, "i") },
-        status: "ACTIVE",
+        status: { $in: ["ACTIVE", "UNAVAILABLE"] },
       }).populate("category", "name slug");
     }
 
@@ -228,7 +228,7 @@ export const searchProducts = async (
         { description: { $regex: searchQuery, $options: "i" } },
         { sku: { $regex: searchQuery, $options: "i" } },
       ],
-      status: "ACTIVE", // Admin DB uses uppercase
+      status: { $in: ["ACTIVE", "UNAVAILABLE"] }, // Include UNAVAILABLE products
     })
       .populate("category", "name slug")
       .limit(limitNum);
@@ -285,7 +285,7 @@ export const getProductsByCategory = async (
 
     const query: any = {
       category: category._id,
-      status: "ACTIVE", // Admin DB uses uppercase
+      status: { $in: ["ACTIVE", "UNAVAILABLE"] }, // Include UNAVAILABLE products
     };
 
     if (minPrice || maxPrice) {

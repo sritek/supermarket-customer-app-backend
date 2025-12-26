@@ -1,5 +1,5 @@
 import { Response } from "express";
-import Order from "../models/Order";
+import AdminOrder from "../models/AdminOrder";
 import Cart from "../models/Cart";
 import Product from "../models/Product";
 import Address from "../models/Address";
@@ -124,32 +124,114 @@ export const createOrder = async (
     const deliveryFee = subtotal >= 500 ? 0 : DELIVERY_FEE; // Free delivery above ₹500
     const total = subtotal + tax + deliveryFee;
 
-    // Create order in customer DB
-    const order = await Order.create({
-      customerId: req.user!._id,
-      items: orderItems,
-      subtotal,
-      tax,
-      deliveryFee,
-      total,
-      address: addressId,
-      paymentMethod,
-      paymentStatus: paymentMethod === "cod" ? "pending" : "paid", // Razorpay orders are paid
-      orderStatus: "placed",
-      razorpayOrderId: razorpayOrderId || undefined,
-      razorpayPaymentId: razorpayPaymentId || undefined,
-    });
+    // Map payment method to admin DB format
+    const paymentMethodMap: Record<string, 'CASH' | 'CARD' | 'ONLINE' | 'OTHER'> = {
+      cod: 'CASH',
+      razorpay: 'ONLINE',
+    };
 
-    // Clear cart
-    cart.items = [];
-    await cart.save();
+    // Map payment status to admin DB format
+    const paymentStatusMap: Record<string, 'PENDING' | 'PAID' | 'FAILED' | 'REFUNDED'> = {
+      pending: 'PENDING',
+      paid: 'PAID',
+      failed: 'FAILED',
+      refunded: 'REFUNDED',
+    };
 
-    // Populate address before returning
-    await order.populate('address');
+    // Prepare order items for admin DB (with subtotal)
+    const adminOrderItems = orderItems.map((item) => ({
+      product: item.product,
+      name: item.name,
+      quantity: item.quantity,
+      price: item.price,
+      subtotal: item.price * item.quantity,
+    }));
 
-    res.status(201).json({ success: true, order });
+    // Get address details
+    const addressObj = address.toObject ? address.toObject() : address;
+
+    // Ensure admin DB connection is ready
+    const { adminDbConnection } = await import('../config/database');
+    if (!adminDbConnection || adminDbConnection.readyState !== 1) {
+      res.status(503).json({ 
+        success: false, 
+        error: 'Service temporarily unavailable. Please try again.' 
+      });
+      return;
+    }
+
+    // Generate order number
+    const timestamp = Date.now();
+    const randomSuffix = Math.random().toString(36).substr(2, 6).toUpperCase();
+    const orderNumber = `ORD-${timestamp}-${randomSuffix}`;
+
+    // Create order directly in admin DB (single source of truth)
+    try {
+      const order = await AdminOrder.create({
+        orderNumber,
+        customer: req.user!._id,
+        items: adminOrderItems,
+        subtotal,
+        tax,
+        shipping: deliveryFee,
+        total,
+        status: 'PLACED',
+        paymentMethod: paymentMethodMap[paymentMethod] || 'OTHER',
+        paymentStatus: paymentStatusMap[paymentMethod === "cod" ? "pending" : "paid"] || 'PENDING',
+        shippingAddress: {
+          street: addressObj.addressLine1 || '',
+          city: addressObj.city || '',
+          state: addressObj.state || '',
+          zipCode: addressObj.pincode || '',
+          country: addressObj.country || 'India',
+        },
+      });
+
+      // Clear cart
+      cart.items = [];
+      await cart.save();
+
+      // Transform order to match customer app format for response
+      const orderResponse = {
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        customerId: order.customer,
+        items: order.items.map((item: any) => ({
+          product: item.product,
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity,
+          image: orderItems.find((oi: any) => oi.product.toString() === item.product.toString())?.image,
+        })),
+        subtotal: order.subtotal,
+        tax: order.tax,
+        deliveryFee: order.shipping,
+        total: order.total,
+        address: addressObj,
+        paymentMethod: paymentMethod,
+        paymentStatus: paymentMethod === "cod" ? "pending" : "paid",
+        orderStatus: order.status.toLowerCase(),
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+      };
+
+      res.status(201).json({ success: true, order: orderResponse });
+    } catch (orderError: any) {
+      console.error('Error creating order in admin DB:', orderError);
+      // If order creation fails, don't clear the cart
+      res.status(500).json({ 
+        success: false, 
+        error: orderError.message || 'Failed to create order. Please try again.' 
+      });
+      return;
+    }
+
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('Error in createOrder:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to create order. Please try again.' 
+    });
   }
 };
 
@@ -158,11 +240,66 @@ export const getOrders = async (
   res: Response
 ): Promise<void> => {
   try {
-    // Customer can only read their own orders
-    // Populate address since it's in the same database (customer DB)
-    const orders = await Order.find({ customerId: req.user?._id })
-      .populate('address')
+    // Customer can only read their own orders from admin DB
+    const adminOrders = await AdminOrder.find({ customer: req.user?._id })
+      .populate('items.product', 'name sku images')
       .sort({ createdAt: -1 });
+
+    // Transform orders to match customer app format
+    const orders = await Promise.all(
+      adminOrders.map(async (order: any) => {
+        const orderObj = order.toObject ? order.toObject() : order;
+        
+        // Map status back to customer app format
+        const statusMap: Record<string, string> = {
+          PLACED: 'placed',
+          PROCESSING: 'processing',
+          PACKED: 'processing',
+          OUT_FOR_DELIVERY: 'shipped',
+          DELIVERED: 'delivered',
+          CANCELLED: 'cancelled',
+        };
+
+        // Map payment method back to customer app format
+        const paymentMethodMap: Record<string, string> = {
+          CASH: 'cod',
+          CARD: 'card',
+          ONLINE: 'razorpay',
+          OTHER: 'other',
+        };
+
+        // Map payment status back to customer app format
+        const paymentStatusMap: Record<string, string> = {
+          PENDING: 'pending',
+          PAID: 'paid',
+          FAILED: 'failed',
+          REFUNDED: 'refunded',
+        };
+
+        return {
+          _id: orderObj._id,
+          orderNumber: orderObj.orderNumber,
+          customerId: orderObj.customer,
+          items: orderObj.items.map((item: any) => ({
+            product: item.product,
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            image: item.product?.images?.[0],
+          })),
+          subtotal: orderObj.subtotal,
+          tax: orderObj.tax,
+          deliveryFee: orderObj.shipping,
+          total: orderObj.total,
+          address: orderObj.shippingAddress,
+          paymentMethod: paymentMethodMap[orderObj.paymentMethod] || 'other',
+          paymentStatus: paymentStatusMap[orderObj.paymentStatus] || 'pending',
+          orderStatus: statusMap[orderObj.status] || 'placed',
+          createdAt: orderObj.createdAt,
+          updatedAt: orderObj.updatedAt,
+        };
+      })
+    );
 
     res.json({ success: true, orders });
   } catch (error: any) {
@@ -177,17 +314,67 @@ export const getOrder = async (
   try {
     const { orderId } = req.params;
 
-    // Customer can only read their own orders
-    // Populate address since it's in the same database (customer DB)
-    const order = await Order.findOne({
+    // Customer can only read their own orders from admin DB
+    const adminOrder = await AdminOrder.findOne({
       _id: orderId,
-      customerId: req.user?._id, // Ensure customer can only access their own orders
-    }).populate('address');
+      customer: req.user?._id, // Ensure customer can only access their own orders
+    }).populate('items.product', 'name sku images');
 
-    if (!order) {
+    if (!adminOrder) {
       res.status(404).json({ success: false, error: "Order not found" });
       return;
     }
+
+    const orderObj = adminOrder.toObject ? adminOrder.toObject() : adminOrder;
+
+    // Map status back to customer app format
+    const statusMap: Record<string, string> = {
+      PLACED: 'placed',
+      PROCESSING: 'processing',
+      PACKED: 'processing',
+      OUT_FOR_DELIVERY: 'shipped',
+      DELIVERED: 'delivered',
+      CANCELLED: 'cancelled',
+    };
+
+    // Map payment method back to customer app format
+    const paymentMethodMap: Record<string, string> = {
+      CASH: 'cod',
+      CARD: 'card',
+      ONLINE: 'razorpay',
+      OTHER: 'other',
+    };
+
+    // Map payment status back to customer app format
+    const paymentStatusMap: Record<string, string> = {
+      PENDING: 'pending',
+      PAID: 'paid',
+      FAILED: 'failed',
+      REFUNDED: 'refunded',
+    };
+
+    const order = {
+      _id: orderObj._id,
+      orderNumber: orderObj.orderNumber,
+      customerId: orderObj.customer,
+      items: orderObj.items.map((item: any) => ({
+        product: item.product,
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
+        image: item.product?.images?.[0],
+      })),
+      subtotal: orderObj.subtotal,
+      tax: orderObj.tax,
+      deliveryFee: orderObj.shipping,
+      total: orderObj.total,
+      address: orderObj.shippingAddress,
+      paymentMethod: paymentMethodMap[orderObj.paymentMethod] || 'other',
+      paymentStatus: paymentStatusMap[orderObj.paymentStatus] || 'pending',
+      orderStatus: statusMap[orderObj.status] || 'placed',
+      createdAt: orderObj.createdAt,
+      updatedAt: orderObj.updatedAt,
+    };
 
     res.json({ success: true, order });
   } catch (error: any) {

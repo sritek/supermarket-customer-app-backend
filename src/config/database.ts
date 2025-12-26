@@ -2,8 +2,9 @@ import mongoose, { Connection } from "mongoose";
 import { ServerApiVersion } from "mongodb";
 
 // CUSTOMER DATABASE OWNERSHIP
-// This database owns customer-specific data: users, addresses, carts, orders
-// Must NOT contain: products, categories, inventory
+// This database owns customer-specific data: users, addresses, carts
+// Orders are stored in admin DB (single source of truth)
+// Must NOT contain: products, categories, inventory, orders
 // Customer app must read products/categories from admin DB via API or direct connection
 
 const clientOptions = {
@@ -16,27 +17,29 @@ const clientOptions = {
 
 // Get customer database URI - defaults to supermarket_customer
 const getCustomerDBURI = (): string => {
+  // Use MONGO_CUSTOMER_URI if available, otherwise use base URI
+  // The dbName option will set the actual database name
   if (process.env.MONGO_CUSTOMER_URI) {
     return process.env.MONGO_CUSTOMER_URI;
   }
-  // Extract base URI and append customer DB name
-  const baseURI = process.env.MONGODB_URI || "mongodb://localhost:27017";
-  // Remove any existing database name and add supermarket_customer
-  const uri = baseURI.replace(/\/[^\/]+$/, "") + "/supermarket_customer";
-  return uri;
+  return (
+    process.env.MONGODB_URI ||
+    process.env.MONGO_ADMIN_URI ||
+    "mongodb://localhost:27017"
+  );
 };
 
 // Get admin database URI - for reading products/categories
 const getAdminDBURI = (): string => {
+  // Use MONGO_ADMIN_URI if available, otherwise use base URI
+  // The dbName option will set the actual database name
   if (process.env.MONGO_ADMIN_URI) {
     return process.env.MONGO_ADMIN_URI;
   }
-  const baseURI = process.env.MONGODB_URI || "mongodb://localhost:27017";
-  const uri = baseURI.replace(/\/[^\/]+$/, "") + "/supermarket_admin";
-  return uri;
+  return process.env.MONGODB_URI || "mongodb://localhost:27017";
 };
 
-// Admin database connection - for reading products/categories (read-only access)
+// Admin database connection - for reading products/categories and writing orders
 let adminDbConnection: Connection | null = null;
 
 const connectAdminDB = async (): Promise<Connection> => {
@@ -47,16 +50,22 @@ const connectAdminDB = async (): Promise<Connection> => {
 
     const mongoURI = getAdminDBURI();
 
-    adminDbConnection = await mongoose.createConnection(mongoURI, {
+    adminDbConnection = mongoose.createConnection(mongoURI, {
       ...clientOptions,
       dbName: "supermarket_admin",
     });
 
-    console.log(`✅ Admin MongoDB Connected (Read-Only for Customer App)`);
+    // Wait for connection to be ready
+    await new Promise<void>((resolve, reject) => {
+      adminDbConnection!.once("connected", resolve);
+      adminDbConnection!.once("error", reject);
+    });
+
+    console.log(`✅ Admin MongoDB Connected (for Customer App)`);
     console.log(`   Host: ${adminDbConnection.host}`);
     console.log(`   Database: ${adminDbConnection.name}`);
     console.log(
-      `   Note: Customer app reads products/categories from admin DB`
+      `   Note: Customer app reads products/categories and writes orders to admin DB`
     );
 
     // Initialize admin models after connection is ready

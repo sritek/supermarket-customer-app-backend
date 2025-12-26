@@ -15,7 +15,7 @@ export interface IProduct extends Document {
   stock: number; // Admin DB uses 'stock', not 'stockQuantity'
   stockQuantity?: number; // Alias for compatibility
   images: string[];
-  status: "ACTIVE" | "INACTIVE"; // Admin DB uses uppercase
+  status: "ACTIVE" | "INACTIVE" | "UNAVAILABLE"; // Admin DB uses uppercase
   unit?: string;
   brand?: string;
   lowStockThreshold?: number;
@@ -67,7 +67,7 @@ const ProductSchema = new Schema<IProduct>(
     ],
     status: {
       type: String,
-      enum: ["ACTIVE", "INACTIVE"], // Match admin DB enum
+      enum: ["ACTIVE", "INACTIVE", "UNAVAILABLE"], // Match admin DB enum
       default: "ACTIVE",
     },
     unit: {
